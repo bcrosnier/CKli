@@ -128,6 +128,7 @@ public static class CKliCommands
         if( !_commands.TryFindForExecution( monitor, cmdLine, out var helpPath )
             || (cmdLine.FoundCommand != null && cmdLine.HasHelp) )
         {
+            cmdLine.CloseAndForgetRemainingArguments();
             context.Screen.DisplayHelp( _commands.GetForHelp( context.Screen.ScreenType, helpPath, null ),
                                         cmdLine,
                                         (interactiveScreen != null ? null : CKliRootEnv.GlobalOptions?.Invoke()) ?? default,
@@ -154,6 +155,7 @@ public static class CKliCommands
             {
                 monitor.Error( $"Unknown command '{cmdLine.InitialAsStringArguments}'." );
             }
+            cmdLine.CloseAndForgetRemainingArguments();
             context.Screen.DisplayHelp( _commands.GetForHelp( context.Screen.ScreenType, helpPath, null ),
                                         cmdLine,
                                         (interactiveScreen != null ? null : CKliRootEnv.GlobalOptions?.Invoke()) ?? default,
