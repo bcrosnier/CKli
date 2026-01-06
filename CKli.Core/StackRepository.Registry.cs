@@ -24,6 +24,16 @@ public sealed partial class StackRepository
     /// <returns>True on success, false on error.</returns>
     public static bool ClearRegistry( IActivityMonitor monitor ) => Registry.ClearRegistry( monitor );
 
+    /// <summary>
+    /// Gets all registered stacks from the <see cref="StackRegistryFileName"/>.
+    /// <para>
+    /// This automatically validates and cleans up stale entries (deleted directories).
+    /// </para>
+    /// </summary>
+    /// <param name="monitor">The monitor to use.</param>
+    /// <returns>A read-only list of registered stacks with their paths and URIs.</returns>
+    public static IReadOnlyList<(NormalizedPath Path, Uri Uri)> GetAllRegisteredStacks( IActivityMonitor monitor ) => Registry.GetAllStacks( monitor );
+
     static class Registry
     {
         static NormalizedPath _regFilePath;
@@ -51,6 +61,82 @@ public sealed partial class StackRepository
             return FileHelper.DeleteFile( monitor, _regFilePath );
         }
 
+        public static IReadOnlyList<(NormalizedPath Path, Uri Uri)> GetAllStacks( IActivityMonitor monitor )
+        {
+            using Mutex mutex = CKliRootEnv.AcquireAppMutex( monitor );
+            var result = new List<(NormalizedPath Path, Uri Uri)>();
+
+            if( !File.Exists( _regFilePath ) )
+            {
+                return result;
+            }
+
+            var map = new Dictionary<NormalizedPath, Uri>();
+            bool mustSave = false;
+
+            foreach( var line in File.ReadLines( _regFilePath ) )
+            {
+                try
+                {
+                    var s = ReadOneLine( monitor, line );
+                    if( !Directory.Exists( s.Path ) )
+                    {
+                        monitor.Info( $"Stack at '{s.Path}' ({s.Uri}) has been deleted." );
+                        mustSave = true;
+                    }
+                    else
+                    {
+                        if( !map.TryAdd( s.Path, s.Uri ) )
+                        {
+                            monitor.Warn( $"Duplicate path '{s.Path}' found. It will be deleted." );
+                            mustSave = true;
+                        }
+                    }
+                }
+                catch( Exception ex )
+                {
+                    monitor.Warn( $"While reading line '{line}' from '{_regFilePath}'. This faulty line will be deleted.", ex );
+                    mustSave = true;
+                }
+            }
+
+            if( mustSave )
+            {
+                monitor.Trace( $"Updating file '{_regFilePath}' with {map.Count} stacks after cleanup." );
+                SaveRegistry( monitor, map );
+            }
+
+            foreach( var (path, uri) in map )
+            {
+                result.Add( (path, uri) );
+            }
+
+            return result;
+        }
+
+        static void SaveRegistry( IActivityMonitor monitor, Dictionary<NormalizedPath, Uri> map )
+        {
+            var b = new StringBuilder();
+            foreach( var (path, uri) in map )
+            {
+                b.Append( path ).Append( '*' ).Append( uri ).AppendLine();
+            }
+            File.WriteAllText( _regFilePath, b.ToString() );
+        }
+
+        static (NormalizedPath Path, Uri Uri) ReadOneLine( IActivityMonitor monitor, string line )
+        {
+            var s = line.Split( '*', StringSplitOptions.TrimEntries );
+            var gitPath = new NormalizedPath( s[0] );
+            if( gitPath.Parts.Count <= 3 ) Throw.InvalidDataException( $"Too short path: '{gitPath}'." );
+            if( gitPath.LastPart != PublicStackName && gitPath.LastPart != PrivateStackName )
+            {
+                Throw.InvalidDataException( $"Invalid path: '{gitPath}'. Must end with '{PublicStackName}' or '{PrivateStackName}'." );
+            }
+            var url = GitRepositoryKey.CheckAndNormalizeRepositoryUrl( new Uri( s[1], UriKind.Absolute ) );
+            return (gitPath, url);
+        }
+
         static void FindOrUpdate( IActivityMonitor monitor, NormalizedPath newPath, Uri findOrUpdateStackUri, out List<NormalizedPath>? foundPath )
         {
             foundPath = newPath.IsEmptyPath
@@ -59,33 +145,10 @@ public sealed partial class StackRepository
             using Mutex mutex = CKliRootEnv.AcquireAppMutex( monitor );
             var map = new Dictionary<NormalizedPath, Uri>();
 
-            bool mustSave = !File.Exists( _regFilePath )
-                            || ReadStackRegistry( monitor, findOrUpdateStackUri, foundPath, map );
+            bool mustSave = !File.Exists( _regFilePath );
 
-            if( foundPath == null )
+            if( !mustSave )
             {
-                map[newPath] = findOrUpdateStackUri;
-                mustSave = true;
-            }
-            if( mustSave )
-            {
-                monitor.Trace( $"Updating file '{_regFilePath}' with {map.Count} stacks." );
-                LockedSave( monitor, map );
-            }
-
-            static void LockedSave( IActivityMonitor monitor, Dictionary<NormalizedPath, Uri> map )
-            {
-                var b = new StringBuilder();
-                foreach( var (path, uri) in map )
-                {
-                    b.Append( path ).Append( '*' ).Append( uri ).AppendLine();
-                }
-                File.WriteAllText( _regFilePath, b.ToString() );
-            }
-
-            static bool ReadStackRegistry( IActivityMonitor monitor, Uri findOrUpdateStackUri, List<NormalizedPath>? foundPath, Dictionary<NormalizedPath, Uri> map )
-            {
-                bool mustSave = false;
                 foreach( var line in File.ReadLines( _regFilePath ) )
                 {
                     try
@@ -115,22 +178,17 @@ public sealed partial class StackRepository
                         mustSave = true;
                     }
                 }
+            }
 
-                return mustSave;
-
-                static (NormalizedPath Path, Uri Uri) ReadOneLine( IActivityMonitor monitor, string line )
-                {
-                    var s = line.Split( '*', StringSplitOptions.TrimEntries );
-                    var gitPath = new NormalizedPath( s[0] );
-                    if( gitPath.Parts.Count <= 3 ) Throw.InvalidDataException( $"Too short path: '{gitPath}'." );
-                    if( gitPath.LastPart != PublicStackName && gitPath.LastPart != PrivateStackName )
-                    {
-                        Throw.InvalidDataException( $"Invalid path: '{gitPath}'. Must end with '{PublicStackName}' or '{PrivateStackName}'." );
-                    }
-                    var url = GitRepositoryKey.CheckAndNormalizeRepositoryUrl( new Uri( s[1], UriKind.Absolute ) );
-                    return (gitPath, url);
-                }
-
+            if( foundPath == null )
+            {
+                map[newPath] = findOrUpdateStackUri;
+                mustSave = true;
+            }
+            if( mustSave )
+            {
+                monitor.Trace( $"Updating file '{_regFilePath}' with {map.Count} stacks." );
+                SaveRegistry( monitor, map );
             }
         }
     }

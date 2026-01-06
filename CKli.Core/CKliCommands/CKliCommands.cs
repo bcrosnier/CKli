@@ -33,6 +33,9 @@ public static class CKliCommands
         Add( cmds, new CKliRepoAdd() );
         Add( cmds, new CKliRepoRemove() );
 
+        cmds.Add( "stack", null );
+        Add( cmds, new CKliStackList() );
+
         cmds.Add( "plugin", null );
         Add( cmds, new CKliPluginAdd() );
         Add( cmds, new CKliPluginCreate() );
